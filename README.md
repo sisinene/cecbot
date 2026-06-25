@@ -34,6 +34,7 @@ A small Python Telegram bot that answers messages with Groq-hosted AI.
    TELEGRAM_BOT_TOKEN=your_telegram_bot_token
    GROQ_API_KEY=your_groq_api_key
    GROQ_MODEL=llama-3.3-70b-versatile
+   PORT=10000
    BOT_SYSTEM_PROMPT=You are CECBot, a helpful Telegram AI assistant. Be clear, concise, friendly, and practical.
    MEMORY_DB_PATH=bot_memory.sqlite3
    MAX_HISTORY_MESSAGES=20
@@ -55,11 +56,38 @@ A small Python Telegram bot that answers messages with Groq-hosted AI.
 
 This bot uses Telegram long polling, so it can run on a VPS, local machine, or worker process without setting up a public webhook URL.
 
+## Render Free Web Service
+
+Use these settings for a Render Python Web Service:
+
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `python bot.py`
+- Health Check Path: `/healthz`
+
+Set these environment variables in Render:
+
+- `TELEGRAM_BOT_TOKEN`
+- `GROQ_API_KEY`
+- `GROQ_MODEL`
+- `MEMORY_DB_PATH`
+- `MAX_HISTORY_MESSAGES`
+- `MAX_STORED_MESSAGES`
+- `ENABLE_GROUND_CHECK`
+- `GROUND_CHECK_MIN_CHARS`
+- `ENABLE_MULTI_CHAIN_REASONING`
+- `REASONING_CHAINS`
+- `MULTI_CHAIN_MIN_CHARS`
+
+Render provides `PORT` automatically for web services. The bot starts a small health server on that port while Telegram polling runs in the same process.
+
+On Render's free tier, local SQLite memory can be lost when the service restarts or spins down. Use a hosted database if you need durable memory.
+
 For production, set these environment variables in your host instead of committing a `.env` file:
 
 - `TELEGRAM_BOT_TOKEN`
 - `GROQ_API_KEY`
 - `GROQ_MODEL`
+- `PORT`
 - `BOT_SYSTEM_PROMPT`
 - `MEMORY_DB_PATH`
 - `MAX_HISTORY_MESSAGES`

@@ -2,8 +2,10 @@ import logging
 import os
 import re
 import sqlite3
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from asyncio import gather, to_thread
 from pathlib import Path
+from threading import Thread
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -23,6 +25,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+PORT = int(os.getenv("PORT", "10000"))
 DEFAULT_SYSTEM_PROMPT = """
 You are CECBot, a helpful AI assistant inside Telegram.
 
@@ -241,6 +244,31 @@ class ChatMemory:
 
 
 memory = ChatMemory(MEMORY_DB_PATH, MAX_HISTORY_MESSAGES, MAX_STORED_MESSAGES)
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path not in {"/", "/healthz"}:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        body = b"CECBot is running\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        logger.debug("Health server: " + format, *args)
+
+
+def start_health_server() -> None:
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info("Health server listening on port %s", PORT)
 
 
 def require_config() -> None:
@@ -548,6 +576,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     require_config()
+    start_health_server()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
