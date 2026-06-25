@@ -7,8 +7,9 @@ A small Python Telegram bot that answers messages with Groq-hosted AI.
 - Private chat replies
 - Group chat replies when mentioned or replied to
 - Persistent per-chat SQLite memory
+- Ground-check pass for factual caution and memory claims
 - Multi-chain reasoning for complex prompts
-- `/start`, `/help`, `/memory`, `/reasoning`, and `/reset` commands
+- `/start`, `/help`, `/grounding`, `/memory`, `/reasoning`, and `/reset` commands
 - Credentials loaded from environment variables
 
 ## Setup
@@ -33,10 +34,12 @@ A small Python Telegram bot that answers messages with Groq-hosted AI.
    TELEGRAM_BOT_TOKEN=your_telegram_bot_token
    GROQ_API_KEY=your_groq_api_key
    GROQ_MODEL=llama-3.3-70b-versatile
-   BOT_SYSTEM_PROMPT=You are a helpful, concise AI assistant inside Telegram.
+   BOT_SYSTEM_PROMPT=You are CECBot, a helpful Telegram AI assistant. Be clear, concise, friendly, and practical.
    MEMORY_DB_PATH=bot_memory.sqlite3
    MAX_HISTORY_MESSAGES=20
    MAX_STORED_MESSAGES=300
+   ENABLE_GROUND_CHECK=true
+   GROUND_CHECK_MIN_CHARS=40
    ENABLE_MULTI_CHAIN_REASONING=true
    REASONING_CHAINS=3
    MULTI_CHAIN_MIN_CHARS=80
@@ -61,6 +64,8 @@ For production, set these environment variables in your host instead of committi
 - `MEMORY_DB_PATH`
 - `MAX_HISTORY_MESSAGES`
 - `MAX_STORED_MESSAGES`
+- `ENABLE_GROUND_CHECK`
+- `GROUND_CHECK_MIN_CHARS`
 - `ENABLE_MULTI_CHAIN_REASONING`
 - `REASONING_CHAINS`
 - `MULTI_CHAIN_MIN_CHARS`
@@ -70,6 +75,17 @@ For production, set these environment variables in your host instead of committi
 Chat memory is stored in a local SQLite database. By default, the bot keeps up to 300 messages per chat and sends the latest 20 memory messages to the AI model as context.
 
 Use `/memory` in Telegram to see how many memory messages are stored for the current chat. Use `/reset` to clear memory for that chat.
+
+## Ground Checking
+
+When ground checking is enabled, the bot reviews its draft answer before sending. It removes unsupported specifics, softens uncertain claims, avoids pretending it has live data, and checks that memory claims are supported by the chat context.
+
+Use `/grounding` to check the current chat's setting. Use `/grounding on` or `/grounding off` to change it for that chat.
+
+Tune grounding with:
+
+- `ENABLE_GROUND_CHECK`: default on/off behavior
+- `GROUND_CHECK_MIN_CHARS`: minimum combined prompt and draft length before automatic checking
 
 ## Multi-Chain Reasoning
 

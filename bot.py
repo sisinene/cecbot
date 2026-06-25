@@ -58,8 +58,13 @@ ENABLE_MULTI_CHAIN_REASONING = os.getenv(
     "ENABLE_MULTI_CHAIN_REASONING",
     "true",
 ).lower() in {"1", "true", "yes", "on"}
+ENABLE_GROUND_CHECK = os.getenv(
+    "ENABLE_GROUND_CHECK",
+    "true",
+).lower() in {"1", "true", "yes", "on"}
 REASONING_CHAINS = max(1, min(5, int(os.getenv("REASONING_CHAINS", "3"))))
 MULTI_CHAIN_MIN_CHARS = int(os.getenv("MULTI_CHAIN_MIN_CHARS", "80"))
+GROUND_CHECK_MIN_CHARS = int(os.getenv("GROUND_CHECK_MIN_CHARS", "40"))
 REASONING_TRIGGER_WORDS = {
     "analyze",
     "architecture",
@@ -80,6 +85,25 @@ REASONING_TRIGGER_WORDS = {
     "strategy",
     "tradeoff",
     "why",
+}
+GROUND_CHECK_TRIGGER_WORDS = {
+    "current",
+    "evidence",
+    "fact",
+    "latest",
+    "legal",
+    "medical",
+    "news",
+    "price",
+    "prove",
+    "quote",
+    "real",
+    "recent",
+    "regulation",
+    "research",
+    "source",
+    "today",
+    "verify",
 }
 
 logging.basicConfig(
@@ -243,6 +267,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "/start - intro\n"
+        "/grounding - show or change ground checking\n"
         "/memory - show this chat's stored memory size\n"
         "/reasoning - show or change multi-chain reasoning\n"
         "/reset - clear this chat's memory\n"
@@ -271,6 +296,13 @@ def multi_chain_enabled(chat_id: int) -> bool:
     return setting == "on"
 
 
+def ground_check_enabled(chat_id: int) -> bool:
+    setting = memory.get_setting(chat_id, "ground_check")
+    if setting is None:
+        return ENABLE_GROUND_CHECK
+    return setting == "on"
+
+
 async def reasoning_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     action = context.args[0].lower() if context.args else "status"
@@ -290,6 +322,29 @@ async def reasoning_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"Multi-chain reasoning is {state}. "
         f"When active, complex prompts use {REASONING_CHAINS} independent chains "
         "and a final synthesis answer. Use /reasoning on or /reasoning off."
+    )
+
+
+async def grounding_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    action = context.args[0].lower() if context.args else "status"
+
+    if action in {"on", "enable", "enabled"}:
+        memory.set_setting(chat_id, "ground_check", "on")
+        await update.message.reply_text("Ground checking is on for this chat.")
+        return
+
+    if action in {"off", "disable", "disabled"}:
+        memory.set_setting(chat_id, "ground_check", "off")
+        await update.message.reply_text("Ground checking is off for this chat.")
+        return
+
+    state = "on" if ground_check_enabled(chat_id) else "off"
+    await update.message.reply_text(
+        f"Ground checking is {state}. "
+        "When active, I review drafts for unsupported claims, stale/live-data "
+        "assumptions, and memory overreach before sending. Use /grounding on "
+        "or /grounding off."
     )
 
 
@@ -389,11 +444,45 @@ def build_synthesis_messages(
     ]
 
 
-async def generate_answer(chat_id: int, user_text: str) -> str:
+def should_use_ground_check(chat_id: int, user_text: str, draft_answer: str) -> bool:
+    if not ground_check_enabled(chat_id):
+        return False
+
+    normalized = f"{user_text}\n{draft_answer}".lower()
+    has_trigger = any(word in normalized for word in GROUND_CHECK_TRIGGER_WORDS)
+    combined_length = len(user_text) + len(draft_answer)
+    return has_trigger or combined_length >= GROUND_CHECK_MIN_CHARS
+
+
+def build_ground_check_messages(
+    base_messages: list[dict[str, str]],
+    user_text: str,
+    draft_answer: str,
+) -> list[dict[str, str]]:
+    ground_check_prompt = (
+        "Ground-check and revise the draft answer before it is sent to the user.\n\n"
+        "Rules:\n"
+        "- Compare the draft against the latest user request and available chat history.\n"
+        "- Remove or soften unsupported specifics, invented facts, fake citations, and memory claims not present in context.\n"
+        "- If the answer depends on live/current data, say that you cannot verify live data from this chat unless the user supplied it.\n"
+        "- Keep useful reasoning summarized, but do not reveal hidden chain-of-thought.\n"
+        "- Preserve the user's language and Telegram-friendly formatting.\n"
+        "- Return only the corrected final answer.\n\n"
+        f"Latest request:\n{user_text}\n\n"
+        f"Draft answer:\n{draft_answer}"
+    )
+    return [
+        *base_messages[:-1],
+        {"role": "user", "content": ground_check_prompt},
+    ]
+
+
+async def generate_draft_answer(chat_id: int, user_text: str) -> tuple[str, list[dict[str, str]]]:
     base_messages = build_messages(chat_id, user_text)
 
     if not should_use_multi_chain(chat_id, user_text):
-        return await to_thread(create_chat_completion, base_messages)
+        draft = await to_thread(create_chat_completion, base_messages)
+        return draft, base_messages
 
     chain_tasks = [
         to_thread(
@@ -405,10 +494,25 @@ async def generate_answer(chat_id: int, user_text: str) -> str:
         for chain_number in range(1, REASONING_CHAINS + 1)
     ]
     chain_answers = await gather(*chain_tasks)
-    return await to_thread(
+    draft = await to_thread(
         create_chat_completion,
         build_synthesis_messages(base_messages, user_text, chain_answers),
         0.45,
+        1000,
+    )
+    return draft, base_messages
+
+
+async def generate_answer(chat_id: int, user_text: str) -> str:
+    draft, base_messages = await generate_draft_answer(chat_id, user_text)
+
+    if not should_use_ground_check(chat_id, user_text, draft):
+        return draft
+
+    return await to_thread(
+        create_chat_completion,
+        build_ground_check_messages(base_messages, user_text, draft),
+        0.2,
         1000,
     )
 
@@ -447,6 +551,7 @@ def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("grounding", grounding_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("memory", memory_status))
     application.add_handler(CommandHandler("reasoning", reasoning_command))
