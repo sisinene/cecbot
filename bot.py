@@ -32,6 +32,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("telegram-ai-bot")
 
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
