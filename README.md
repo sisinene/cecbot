@@ -7,7 +7,8 @@ A small Python Telegram bot that answers messages with Groq-hosted AI.
 - Private chat replies
 - Group chat replies when mentioned or replied to
 - Persistent per-chat SQLite memory
-- `/start`, `/help`, `/memory`, and `/reset` commands
+- Multi-chain reasoning for complex prompts
+- `/start`, `/help`, `/memory`, `/reasoning`, and `/reset` commands
 - Credentials loaded from environment variables
 
 ## Setup
@@ -36,6 +37,9 @@ A small Python Telegram bot that answers messages with Groq-hosted AI.
    MEMORY_DB_PATH=bot_memory.sqlite3
    MAX_HISTORY_MESSAGES=20
    MAX_STORED_MESSAGES=300
+   ENABLE_MULTI_CHAIN_REASONING=true
+   REASONING_CHAINS=3
+   MULTI_CHAIN_MIN_CHARS=80
    ```
 
 5. Run the bot:
@@ -57,11 +61,26 @@ For production, set these environment variables in your host instead of committi
 - `MEMORY_DB_PATH`
 - `MAX_HISTORY_MESSAGES`
 - `MAX_STORED_MESSAGES`
+- `ENABLE_MULTI_CHAIN_REASONING`
+- `REASONING_CHAINS`
+- `MULTI_CHAIN_MIN_CHARS`
 
 ## Memory
 
 Chat memory is stored in a local SQLite database. By default, the bot keeps up to 300 messages per chat and sends the latest 20 memory messages to the AI model as context.
 
 Use `/memory` in Telegram to see how many memory messages are stored for the current chat. Use `/reset` to clear memory for that chat.
+
+## Multi-Chain Reasoning
+
+When multi-chain reasoning is enabled, complex prompts generate several independent private answer attempts and then synthesize them into one final response. The bot does not reveal hidden chain-of-thought.
+
+Use `/reasoning` to check the current chat's setting. Use `/reasoning on` or `/reasoning off` to change it for that chat.
+
+Tune depth and latency with:
+
+- `ENABLE_MULTI_CHAIN_REASONING`: default on/off behavior
+- `REASONING_CHAINS`: number of independent attempts, clamped from 1 to 5
+- `MULTI_CHAIN_MIN_CHARS`: prompt length threshold for automatic multi-chain mode
 
 Because bot and API keys are secrets, do not commit `.env`. If a key was shared in chat or exposed publicly, rotate it in the relevant provider dashboard.

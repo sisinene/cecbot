@@ -2,7 +2,7 @@ import logging
 import os
 import re
 import sqlite3
-from asyncio import to_thread
+from asyncio import gather, to_thread
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,6 +30,33 @@ BOT_SYSTEM_PROMPT = os.getenv(
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "12"))
 MAX_STORED_MESSAGES = int(os.getenv("MAX_STORED_MESSAGES", "300"))
 MEMORY_DB_PATH = Path(os.getenv("MEMORY_DB_PATH", "bot_memory.sqlite3"))
+ENABLE_MULTI_CHAIN_REASONING = os.getenv(
+    "ENABLE_MULTI_CHAIN_REASONING",
+    "true",
+).lower() in {"1", "true", "yes", "on"}
+REASONING_CHAINS = max(1, min(5, int(os.getenv("REASONING_CHAINS", "3"))))
+MULTI_CHAIN_MIN_CHARS = int(os.getenv("MULTI_CHAIN_MIN_CHARS", "80"))
+REASONING_TRIGGER_WORDS = {
+    "analyze",
+    "architecture",
+    "calculate",
+    "compare",
+    "debug",
+    "decide",
+    "design",
+    "diagnose",
+    "evaluate",
+    "explain",
+    "fix",
+    "how",
+    "plan",
+    "problem",
+    "reason",
+    "solve",
+    "strategy",
+    "tradeoff",
+    "why",
+}
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -69,6 +96,17 @@ class ChatMemory:
                 """
                 CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
                 ON messages(chat_id, id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_settings (
+                    chat_id INTEGER NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(chat_id, key)
+                )
                 """
             )
 
@@ -129,6 +167,30 @@ class ChatMemory:
             ).fetchone()
         return int(row[0])
 
+    def get_setting(self, chat_id: int, key: str) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT value
+                FROM chat_settings
+                WHERE chat_id = ? AND key = ?
+                """,
+                (chat_id, key),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def set_setting(self, chat_id: int, key: str, value: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_settings(chat_id, key, value, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id, key)
+                DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                """,
+                (chat_id, key, value),
+            )
+
 
 memory = ChatMemory(MEMORY_DB_PATH, MAX_HISTORY_MESSAGES, MAX_STORED_MESSAGES)
 
@@ -158,6 +220,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "/start - intro\n"
         "/memory - show this chat's stored memory size\n"
+        "/reasoning - show or change multi-chain reasoning\n"
         "/reset - clear this chat's memory\n"
         "/help - show commands\n\n"
         "In groups, mention me or reply to one of my messages."
@@ -174,6 +237,35 @@ async def memory_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(
         f"This chat has {stored_messages} stored memory messages. "
         f"I use the latest {MAX_HISTORY_MESSAGES} messages as context."
+    )
+
+
+def multi_chain_enabled(chat_id: int) -> bool:
+    setting = memory.get_setting(chat_id, "multi_chain_reasoning")
+    if setting is None:
+        return ENABLE_MULTI_CHAIN_REASONING
+    return setting == "on"
+
+
+async def reasoning_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    action = context.args[0].lower() if context.args else "status"
+
+    if action in {"on", "enable", "enabled"}:
+        memory.set_setting(chat_id, "multi_chain_reasoning", "on")
+        await update.message.reply_text("Multi-chain reasoning is on for this chat.")
+        return
+
+    if action in {"off", "disable", "disabled"}:
+        memory.set_setting(chat_id, "multi_chain_reasoning", "off")
+        await update.message.reply_text("Multi-chain reasoning is off for this chat.")
+        return
+
+    state = "on" if multi_chain_enabled(chat_id) else "off"
+    await update.message.reply_text(
+        f"Multi-chain reasoning is {state}. "
+        f"When active, complex prompts use {REASONING_CHAINS} independent chains "
+        "and a final synthesis answer. Use /reasoning on or /reasoning off."
     )
 
 
@@ -210,6 +302,93 @@ def build_messages(chat_id: int, user_text: str) -> list[dict[str, str]]:
     return messages
 
 
+def create_chat_completion(
+    messages: list[dict[str, str]],
+    temperature: float = 0.7,
+    max_tokens: int = 900,
+) -> str:
+    completion = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return completion.choices[0].message.content.strip()
+
+
+def should_use_multi_chain(chat_id: int, user_text: str) -> bool:
+    if not multi_chain_enabled(chat_id) or REASONING_CHAINS <= 1:
+        return False
+
+    normalized = user_text.lower()
+    has_trigger = any(word in normalized for word in REASONING_TRIGGER_WORDS)
+    return len(user_text) >= MULTI_CHAIN_MIN_CHARS or has_trigger or "?" in user_text
+
+
+def build_chain_messages(
+    base_messages: list[dict[str, str]],
+    user_text: str,
+    chain_number: int,
+) -> list[dict[str, str]]:
+    chain_prompt = (
+        "Answer the user's latest request using an independent reasoning path. "
+        "Think privately and do not reveal chain-of-thought. Return only a concise, "
+        "actionable answer with key assumptions and caveats when useful.\n\n"
+        f"Reasoning path: {chain_number}\n"
+        f"Latest request: {user_text}"
+    )
+    return [
+        *base_messages[:-1],
+        {"role": "user", "content": chain_prompt},
+    ]
+
+
+def build_synthesis_messages(
+    base_messages: list[dict[str, str]],
+    user_text: str,
+    chain_answers: list[str],
+) -> list[dict[str, str]]:
+    chain_text = "\n\n".join(
+        f"Attempt {index + 1}:\n{answer}"
+        for index, answer in enumerate(chain_answers)
+    )
+    synthesis_prompt = (
+        "Synthesize the independent attempts into the best final response. "
+        "Resolve contradictions, keep useful nuance, and do not mention hidden "
+        "reasoning or chain-of-thought. Be direct and practical.\n\n"
+        f"Latest request:\n{user_text}\n\n"
+        f"Independent attempts:\n{chain_text}"
+    )
+    return [
+        *base_messages[:-1],
+        {"role": "user", "content": synthesis_prompt},
+    ]
+
+
+async def generate_answer(chat_id: int, user_text: str) -> str:
+    base_messages = build_messages(chat_id, user_text)
+
+    if not should_use_multi_chain(chat_id, user_text):
+        return await to_thread(create_chat_completion, base_messages)
+
+    chain_tasks = [
+        to_thread(
+            create_chat_completion,
+            build_chain_messages(base_messages, user_text, chain_number),
+            0.9,
+            700,
+        )
+        for chain_number in range(1, REASONING_CHAINS + 1)
+    ]
+    chain_answers = await gather(*chain_tasks)
+    return await to_thread(
+        create_chat_completion,
+        build_synthesis_messages(base_messages, user_text, chain_answers),
+        0.45,
+        1000,
+    )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not should_answer(update, context):
         return
@@ -225,14 +404,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
-        completion = await to_thread(
-            client.chat.completions.create,
-            model=GROQ_MODEL,
-            messages=build_messages(chat_id, user_text),
-            temperature=0.7,
-            max_tokens=900,
-        )
-        answer = completion.choices[0].message.content.strip()
+        answer = await generate_answer(chat_id, user_text)
     except Exception:
         logger.exception("AI response failed")
         await message.reply_text("I could not get an AI response right now. Please try again.")
@@ -253,6 +425,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("memory", memory_status))
+    application.add_handler(CommandHandler("reasoning", reasoning_command))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
